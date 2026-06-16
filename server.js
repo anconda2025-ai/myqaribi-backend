@@ -2,11 +2,13 @@ import express from "express";
 import Stripe from "stripe";
 import cors from "cors";
 import dotenv from "dotenv";
+import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
 app.use(cors());
 app.use(express.json());
@@ -14,6 +16,9 @@ app.use(express.json());
 // Crea sessione Stripe Checkout
 app.post("/api/create-checkout", async (req, res) => {
   const { amount, recipient, currency } = req.body;
+  const baseAmount = amount / 1.02; // amount already includes 2% commission
+  const commission = amount - baseAmount;
+  const confirmationCode = Math.floor(1000 + Math.random() * 9000).toString();
 
   try {
     const session = await stripe.checkout.sessions.create({
@@ -37,8 +42,22 @@ app.post("/api/create-checkout", async (req, res) => {
       metadata: {
         recipient,
         app: "myqaribi",
+        confirmation_code: confirmationCode,
       },
     });
+
+    // Salva la transazione come "pending" nel database
+    const { error: dbError } = await supabase.from("transactions").insert({
+      sender_name: "Ahmed K.", // TODO: utente reale quando ci sarà autenticazione
+      recipient_name: recipient,
+      amount: baseAmount,
+      commission: commission,
+      total: amount,
+      status: "pending",
+      confirmation_code: confirmationCode,
+    });
+
+    if (dbError) console.error("Errore salvataggio transazione:", dbError);
 
     res.json({ id: session.id });
   } catch (error) {
@@ -71,35 +90,93 @@ app.post("/api/webhook", express.raw({ type: "application/json" }), (req, res) =
   res.json({ received: true });
 });
 
-// Conferma pagamento cash da parte del negoziante
-const confirmedPayments = []; // TODO: sostituire con database reale
+// Lista richieste in attesa (per app negoziante)
+app.get("/api/pending-requests", async (req, res) => {
+  const { data, error } = await supabase
+    .from("transactions")
+    .select("*")
+    .eq("status", "pending")
+    .order("created_at", { ascending: false });
 
-app.post("/api/confirm-payment", (req, res) => {
-  const { id, name, code, amount } = req.body;
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
 
-  confirmedPayments.push({
-    id,
-    name,
-    code,
-    amount,
-    confirmedAt: new Date().toISOString(),
+// Lista richieste confermate oggi (per app negoziante)
+app.get("/api/confirmed-today", async (req, res) => {
+  const { data, error } = await supabase
+    .from("transactions")
+    .select("*")
+    .eq("status", "confirmed")
+    .order("confirmed_at", { ascending: false })
+    .limit(20);
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// Statistiche per dashboard admin
+app.get("/api/admin/stats", async (req, res) => {
+  const { data: transactions, error } = await supabase
+    .from("transactions")
+    .select("*")
+    .order("created_at", { ascending: false });
+
+  if (error) return res.status(500).json({ error: error.message });
+
+  const { data: merchants } = await supabase.from("merchants").select("*");
+
+  const totalVolume = transactions.reduce((s, t) => s + Number(t.amount), 0);
+  const totalCommissions = transactions.reduce((s, t) => s + Number(t.commission), 0);
+
+  res.json({
+    transactions,
+    merchants,
+    totalVolume,
+    totalCommissions,
+    transactionCount: transactions.length,
+    merchantCount: merchants?.length || 0,
   });
+});
 
-  console.log(`✅ Pagamento confermato: ${name} — ${amount}€ — code #${code}`);
+// Conferma pagamento cash da parte del negoziante
+app.post("/api/confirm-payment", async (req, res) => {
+  const { id, code } = req.body;
 
-  // TODO: notifica cliente, aggiorna stato transazione, attiva rimborso serale negoziante
-  res.json({ success: true });
+  const { data, error } = await supabase
+    .from("transactions")
+    .update({ status: "confirmed", confirmed_at: new Date().toISOString() })
+    .eq("id", id)
+    .select();
+
+  if (error) {
+    console.error("Errore conferma pagamento:", error);
+    return res.status(500).json({ error: error.message });
+  }
+
+  console.log(`✅ Pagamento confermato: codice #${code}`);
+  // TODO: notifica cliente, attiva rimborso serale negoziante via Wise
+  res.json({ success: true, data });
 });
 
 // Segnala un problema
-app.post("/api/report-problem", (req, res) => {
-  const { id, name, code } = req.body;
-  console.log(`⚠️ Problema segnalato: ${name} — code #${code}`);
+app.post("/api/report-problem", async (req, res) => {
+  const { id, code } = req.body;
+
+  const { error } = await supabase
+    .from("transactions")
+    .update({ status: "problem" })
+    .eq("id", id);
+
+  if (error) return res.status(500).json({ error: error.message });
+
+  console.log(`⚠️ Problema segnalato: code #${code}`);
   // TODO: notifica admin
   res.json({ success: true });
 });
 
 
+const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`🚀 myQaribi server su http://localhost:${PORT}`);
 });
