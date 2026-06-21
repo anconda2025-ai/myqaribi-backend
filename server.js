@@ -15,7 +15,7 @@ app.use(express.json());
 
 // Crea sessione Stripe Checkout
 app.post("/api/create-checkout", async (req, res) => {
-  const { amount, recipient, currency } = req.body;
+  const { amount, recipient, currency, senderEmail } = req.body;
   const baseAmount = amount / 1.02; // amount already includes 2% commission
   const commission = amount - baseAmount;
   const confirmationCode = Math.floor(1000 + Math.random() * 9000).toString();
@@ -43,12 +43,14 @@ app.post("/api/create-checkout", async (req, res) => {
         recipient,
         app: "myqaribi",
         confirmation_code: confirmationCode,
+        sender_email: senderEmail || "",
       },
     });
 
     // Salva la transazione come "pending" nel database
     const { error: dbError } = await supabase.from("transactions").insert({
-      sender_name: "Ahmed K.", // TODO: utente reale quando ci sarà autenticazione
+      sender_name: senderEmail ? senderEmail.split("@")[0] : "Ahmed K.",
+      sender_email: senderEmail || null,
       recipient_name: recipient,
       amount: baseAmount,
       commission: commission,
@@ -84,7 +86,6 @@ app.post("/api/webhook", express.raw({ type: "application/json" }), (req, res) =
   if (event.type === "checkout.session.completed") {
     const session = event.data.object;
     console.log("✅ Pagamento completato:", session.metadata.recipient, session.amount_total / 100, "€");
-    // TODO: notifica negoziante via Wise
   }
 
   res.json({ received: true });
@@ -113,6 +114,32 @@ app.get("/api/confirmed-today", async (req, res) => {
 
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
+});
+
+// Limite giornaliero reale per utente (basato sulle transazioni di oggi)
+app.get("/api/daily-limit", async (req, res) => {
+  const { email } = req.query;
+  const DAILY_LIMIT = 50;
+
+  if (!email) return res.status(400).json({ error: "email richiesta" });
+
+  const senderName = email.split("@")[0];
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+
+  const { data, error } = await supabase
+    .from("transactions")
+    .select("amount")
+    .eq("sender_email", email)
+    .neq("status", "problem")
+    .gte("created_at", startOfDay.toISOString());
+
+  if (error) return res.status(500).json({ error: error.message });
+
+  const spentToday = (data || []).reduce((sum, t) => sum + Number(t.amount), 0);
+  const remaining = Math.max(0, DAILY_LIMIT - spentToday);
+
+  res.json({ dailyLimit: DAILY_LIMIT, spentToday, remaining });
 });
 
 // Statistiche per dashboard admin
@@ -155,7 +182,6 @@ app.post("/api/confirm-payment", async (req, res) => {
   }
 
   console.log(`✅ Pagamento confermato: codice #${code}`);
-  // TODO: notifica cliente, attiva rimborso serale negoziante via Wise
   res.json({ success: true, data });
 });
 
@@ -171,7 +197,6 @@ app.post("/api/report-problem", async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
 
   console.log(`⚠️ Problema segnalato: code #${code}`);
-  // TODO: notifica admin
   res.json({ success: true });
 });
 
