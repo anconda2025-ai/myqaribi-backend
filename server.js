@@ -51,13 +51,22 @@ function rateLimitMiddleware(req, res, next) {
 
 app.use(rateLimitMiddleware);
 
-const DAILY_LIMIT = 100;
+const DAILY_LIMIT = 250;
 const MIN_AMOUNT = 50;
+const MAX_AMOUNT = 250;
+
+function getFeeRate(amount) {
+  if (amount >= 200) return 0.055;
+  if (amount >= 150) return 0.06;
+  if (amount >= 100) return 0.07;
+  return 0.08;
+}
 
 // Crea sessione Stripe Checkout
 app.post("/api/create-checkout", async (req, res) => {
-  const { amount, recipient, currency, senderEmail } = req.body;
-  const baseAmount = amount / 1.035;
+  const { amount, recipient, currency, senderEmail, merchantId, merchantName } = req.body;
+  const feeRate = req.body.feeRate || getFeeRate(amount / 1.055);
+  const baseAmount = amount / (1 + feeRate);
   const commission = amount - baseAmount;
   const confirmationCode = Math.floor(1000 + Math.random() * 9000).toString();
 
@@ -86,8 +95,8 @@ app.post("/api/create-checkout", async (req, res) => {
         price_data: {
           currency: currency || "eur",
           product_data: {
-            name: `myQaribi — Transfert vers ${recipient}`,
-            description: "Commission 3.5% incluse",
+            name: `myQaribi — ${recipient} via ${merchantName || "village"}`,
+            description: `Commission ${Math.round(feeRate * 100 * 10) / 10}% incluse`,
           },
           unit_amount: Math.round(amount * 100),
         },
@@ -101,6 +110,7 @@ app.post("/api/create-checkout", async (req, res) => {
 
     const { error: dbError } = await supabase.from("transactions").insert({
       sender_name: senderEmail ? senderEmail.split("@")[0] : "Unknown",
+      merchant_id: merchantId || null,
       sender_email: senderEmail || null,
       recipient_name: recipient,
       amount: baseAmount,
