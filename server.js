@@ -51,7 +51,7 @@ function rateLimitMiddleware(req, res, next) {
 
 app.use(rateLimitMiddleware);
 
-const DAILY_LIMIT = 100;
+const DAILY_LIMIT = 250;
 const MIN_AMOUNT = 50;
 const MAX_AMOUNT = 250;
 
